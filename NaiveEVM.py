@@ -1,3 +1,5 @@
+import sha3 # pip install safe-pysha3
+import pdb
 STOP = 0x00
 ADD = 0x01
 MUL = 0x02
@@ -24,6 +26,21 @@ BYTE = 0x1A
 SHL = 0x1B
 SHR = 0x1C
 SAR = 0x1D
+SHA3 = 0x20
+ADDRESS = 0x30
+BALANCE = 0x31
+ORIGIN = 0x32
+CALLER = 0x33
+CALLVALUE = 0x34
+CALLDATALOAD = 0x35
+CALLDATASIZE = 0x36
+CALLDATACOPY = 0x37
+CODESIZE = 0x38
+CODECOPY = 0x39
+GASPRICE = 0x3A
+EXTCODESIZE = 0x3B
+EXTCODECOPY = 0x3C
+EXTCODEHASH = 0x3F
 BLOCKHASH = 0x40
 COINBASE = 0x41
 TIMESTAMP = 0x42
@@ -46,27 +63,66 @@ MSTORE = 0x52
 MSTORE8 = 0x53
 SLOAD = 0x54
 SSTORE = 0x55
-MSIZE = 0x59
 JUMP = 0x56
 JUMPI = 0x57
 PC = 0x58
 MSIZE = 0x59
 JUMPDEST = 0x5B
-#可能的问题就是0XFFFFFFFFFFFFFFFFFFF这样的数，如果是有符号数，那么就是-1，如果是无符号数，那么就是2^256-1这个怎么识别呢
+LOG0 = 0xA0
+LOG1 = 0xA1
+LOG2 = 0xA2
+LOG3 = 0xA3
+LOG4 = 0xA4
 class StopException(Exception):
     pass
+#可能的问题就是0XFFFFFFFFFFFFFFFFFFF这样的数，如果是有符号数，那么就是-1，如果是无符号数，那么就是2^256-1这个怎么识别呢
+account_db = {
+    '0x9bbfed6889322e016e0a02ee459d306fc19545d8': {
+        'balance': 100, # wei #这是账户持有的ETH数量，用Wei表示（1 ETH = 10^18 Wei）。
+        'nonce': 1, #对于外部账户（EOA），这是该账户发送的交易数。对于合约账户，它是该账户创建的合约数量。
+        'storage': {}, #每个合约账户都有与之关联的存储空间，其中包含状态变量的值。address => {key => value}
+        'code': b'\x60\x00\x60\x00'  # Sample bytecode (PUSH1 0x00 PUSH1 0x00) #合约账户的字节码。
+    },
+    # ... 其他账户数据 ...
+}
+class Log:
+    def __init__(self, address, data, topics=[]):
+        self.address = address #这代表产生日志的智能合约的地址 例如，如果合约 0x123... 产生了一个日志，那么 address 将是 0x123...。
+        self.data = data #字段包含了日志事件中的具体数据。这些数据通常是关于合约操作的详细信息，例如，一个交易的金额、用户地址、或其他合约特定的数据点。
+        self.topics = topics #是用于索引日志的参数数组。每个日志可以有一个到四个主题。第一个主题通常是事件的哈希（在合约中定义的事件名称的哈希），其余的主题可以是事件参数的哈希值。
+    def __str__(self):
+        return  f'Log(address={self.address}, data={self.data}, topics={self.topics})'
+class Transaction:
+    def __init__(self, to = '', value = 0, data = '', caller='0x00', origin='0x00', thisAddr='0x00', gasPrice=1, gasLimit=21000, nonce=0, v=0, r=0, s=0):
+        self.nonce = nonce #一个与发送者账户相关的数字，表示该账户已发送的交易数。
+        self.gasPrice = gasPrice #交易发送者愿意支付的单位gas价格。
+        self.gasLimit = gasLimit #交易发送者为这次交易分配的最大gas数量。
+        self.to = to #交易的接收者地址。当交易为合约创建时，这一字段为空。
+        self.value = value #以wei为单位的发送金额。
+        self.data = data #附带的数据，通常为合约调用的输入数据（calldata）或新合约的初始化代码（initcode）。
+        self.caller = caller #包含当前调用者caller
+        self.origin = origin
+        #当用户创建（部署）一个新的智能合约时，这个用户就是原始发送者。在这种情况下，origin 就是部署合约的用户的地址。
+        #当用户发送一个交易以调用已部署的智能合约时，该用户也是原始发送者。即使这个调用触发了合约与合约之间的进一步交互，origin 仍然是最初发起交易的用户地址。
+        self.thisAddr = thisAddr #代表当前合约的地址。在合约执行期间，thisAddr 通常指向执行合约代码的地址。
+        self.v = v #交易的签名信息，用于验证交易发送者的身份。
+        self.r = r #交易的签名信息，用于验证交易发送者的身份。
+        self.s = s #交易的签名信息，用于验证交易发送者的身份。
+        
 class EVM:
-    def __init__(self,code) -> None:
+    def __init__(self,code,txn = None) -> None:
         self.code = code
         self.pc = 0
         self.gas = 0
         self.stack = []
         self.memory = bytearray()  # 每一个元素都是8 bit， 1 byte 每个元素可以存储从0到255的整数值
+        self.warm_address = set() # 用于存储warm slot 这是一个set 用于存储地址
         self.storage = {}
         self.validJumpDest ={} #有效的跳转地址字典
         #EVM提供了一系列指令让智能合约访问当前或历史区块的信息，包括区块哈希、时间戳、coinbase等。
         #这些信息一般保存在区块头（Header）中，但我们可EVM中添加current_block属性来模拟这些区块信息：
-
+        self.txn = txn
+        self.logs = []
         self.current_block = { 
              "blockhash": 0x7527123fc877fe753b3122dc592671b4902ebf2b325dd2c7224a43c0cbeee3ca, # 这是区块的哈希值，是区块的唯一标识符
              "coinbase": 0x388C818CA8B9251b393131C08a736A67ccB19297,# 这通常指的是区块的矿工地址，即创建这个区块的矿工的以太坊地址
@@ -377,7 +433,151 @@ class EVM:
             raise Exception("Stack underflow")
         idx1, idx2 = -1, -position - 1
         self.stack[idx1], self.stack[idx2] = self.stack[idx2], self.stack[idx1]
+        
+    def sha3 (self):
+        if len (self.stack) < 2:
+            raise Exception("Stack underflow")
+        offset = self.stack.pop()
+        size = self.stack.pop()
+        while len(self.memory) < offset + size: #新加的 这里可能有错 具体扩展大小是+32还是？需要再次思考
+            self.memory.append(0) #内存扩展 添加一个byte的0在这里 + gas消耗
+        data = self.memory[offset:offset+size] # 
+        
+        hash_value = int.from_bytes(sha3.keccak_256(data).digest(), 'big')  # 计算哈希值
+        self.stack.append(hash_value)
+    def balance (self): #BALANCE 指令用于返回某个账户的余额。它从堆栈中弹出一个地址，然后查询该地址的余额并压入堆栈
+        if len(self.stack) < 1:
+            raise Exception("Stack underflow")
+        addr_int = self.stack.pop()
+        # 将stack中的int转换为bytes，然后再转换为十六进制字符串，用于在账户数据库中查询
+        add_hex_str = '0x' + addr_int.to_bytes(20, byteorder='big').hex()
+        self.stack.append(account_db[add_hex_str]['balance'])
+        if add_hex_str not in self.warm_address:
+            self.warm_address.add(add_hex_str)
+            print('cold -> warm address', add_hex_str)
+            self.gas += 2600
+        else:
+            print('warm address', add_hex_str)
+            self.gas += 100
+    def extcodesize(self): #指令用于返回某个账户的代码长度（以字节为单位）。它从堆栈中弹出一个地址，然后查询该地址的代码长度并压入堆栈。#如果账户不存在或没有代码，返回0。他的操作码为0x3B，gas为2600（cold address）或100（warm address）。
+        if len(self.stack) < 1:
+            raise Exception("Stack underflow")
+        addr_int = self.stack.pop()
+        # 将stack中的int转换为bytes，然后再转换为十六进制字符串，用于在账户数据库中查询
+        addr_str = '0x' + addr_int.to_bytes(20, byteorder='big').hex()
+        self.stack.append(len(account_db.get(addr_str, {}).get('code', b''))) # 找不到返回一个空的字典 因为是长度为单位，找不到返回0
+        if addr_str not in self.warm_address:
+            self.warm_address.add(addr_str)
+            print('cold -> warm address', addr_str)
+            self.gas += 2600
+        else:
+            print('warm address', addr_str)
+            self.gas += 100    
+    def extcodecopy(self): #指令用于将某个账户的部分代码复制到EVM的内存中 #gas 没有添加
+        if len(self.stack) < 4:
+            raise Exception("Stack underflow")
+        addr_int= self.stack.pop()
+        mem_offset = self.stack.pop()
+        code_offset = self.stack.pop()
+        length = self.stack.pop()
+        addr_str = '0x' + addr_int.to_bytes(20, byteorder='big').hex()
+        code = account_db.get(addr_str, {}).get('code', b'')[code_offset:code_offset+length]
+        while len(self.memory) < mem_offset + length:
+            self.memory.append(0)
+        #pdb.set_trace()
+        self.memory[mem_offset:mem_offset+length] = code
+    def extcodehash(self):#EXTCODEHASH 它从堆栈中弹出一个地址，然后查询该地址的代码并且求代码的哈希并压入堆栈
+        if len(self.stack) < 1:
+            raise Exception("Stack underflow")
+        addr_int = self.stack.pop()
+        # # 将stack中的int转换为bytes，然后再转换为十六进制字符串，用于在账户数据库中查询
+        addr_str = '0x' + addr_int.to_bytes(20, byteorder='big').hex()
+        code = account_db.get(addr_str, {}).get('code', b'')
+        code_hash = int.from_bytes(sha3.keccak_256(code).digest(), 'big')# 计算哈希值
+        self.stack.append(code_hash)
+    def address(self): #将当前执行合约的地址压入堆栈。
+        self.stack.append(self.txn.thisAddr)
+    def origin(self): #将交易的原始发送者EOA（即签名者）地址压入堆栈。
+        self.stack.append(self.txn.origin)
+    def caller (self): #将当前执行环境的调用者地址压入堆栈。
+        self.stack.append(self.txn.caller)
+    def callvalue(self):
+        self.stack.append(self.txn.value)
+    def calldataload(self):#功能：从交易或合约调用的data字段加载数据。它从堆栈中弹出calldata的偏移量（offset），然后从calldata的offset位置读取32字节的数据并压入堆栈。如果calldata剩余不足32字节，则补0。
+        if len(self.stack) < 1:
+            raise Exception("Stack underflow")
+        offset = self.stack.pop() #
+        # 从字符串转化成bytes数组
+        calldata_bytes = bytes.fromhex(self.txn.data[2:])  # 假设由 '0x' 开头
+        data = bytearray(32) # 创建32字节的 byte 数组 每一个都是0 bytearray(b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
+        for i in range(32):
+            if offset + i < len(calldata_bytes):
+                data[i] = calldata_bytes[offset + i]
+        self.stack.append(int.from_bytes(data, 'big'))
+        
+    def calldatasize(self): #功能：返回交易或合约调用的data字段的长度（以字节为单位）。它将data字段的长度压入堆栈。
+        # Assuming calldata is a hex string with a '0x' prefix
+        size = (len(self.txn.data) - 2) // 2 # 除去0x 每两个十六进制字符表示一个字节的数据 再除以2
+        self.stack.append(size)
+        
+    def calldatacopy(self): #将data中的数据复制到内存中
+        if len(self.stack) < 3:
+            raise Exception("Stack underflow")
+        memo_offset = self.stack.pop()
+        calldata_offset = self.stack.pop()
+        length = self.stack.pop()
+        # 拓展内存用这种形式方便gas计算
+        while len(self.memory) < memo_offset + length:
+            self.memory.append(0)
+        # 从字符串转化成bytes数组
+        calldata_bytes = bytes.fromhex(self.txn.data[2:])  # 假设由 '0x' 开头
+        # 从calldata复制进内存
+        for i in range(length):
+            if calldata_offset + i < len(calldata_bytes):
+                self.memory[memo_offset + i] = calldata_bytes[calldata_offset + i]
+    def codesize(self): #返回当前合约的代码大小（以字节为单位）。它将代码大小压入堆栈。
+        addr = self.txn.thisAddr
+        self.stack.append(len(account_db.get(addr, {}).get('code', b'')))
+        
+    def codecopy(self): #当合约需要读取自己的部分字节码时使用这里可能要出问题计算gas的时候
+        if len(self.stack) < 3:
+            raise Exception("Stack underflow")
+        mem_offset = self.stack.pop()
+        code_offset = self.stack.pop()
+        length = self.stack.pop()
+        #获取当前地址的code
+        addr = self.txn.thisAddr
+        code = account_db.get(addr, {}).get('code', b'')
+        # 拓展内存用这种形式方便gas计算
+        while len(self.memory) < mem_offset + length:
+            self.memory.append(0)
+        #代码复制进内存
+        for i in range(length):
+            if code_offset + i < len(code):
+                self.memory[mem_offset + i] = code[code_offset + i]
+        
+    def gasprice (self): #将当前交易的gas价格压入堆栈。
+        self.stack.append(self.txn.gasPrice)
+        
+    def evm_log(self,num_topics): #将当前交易的日志列表压入堆栈。 gas = 375 + 375 * topic数量 + 内存扩展成本
+        #Log指令从堆栈中弹出2 + n的元素。其中前两个参数是内存开始位置mem_offset和数据长度length，n是主题的数量（取决于具体的LOG指令）。所以对于LOG1，我们会从堆栈中弹出3个元素：
+        # 内存开始位置，数据长度，和一个主题。需要mem_offset的原因是日志的数据（data）部分存储在内存中，gas消耗低，而主题（topic）部分直接存储在堆栈上。
+        if len(self.stack) < 2 + num_topics:
+            raise Exception("Stack underflow")
+        mem_offset = self.stack.pop()
+        length = self.stack.pop()
+        topics=[self.stack.pop() for _ in range(num_topics)]
+        
+        while len(self.memory) < mem_offset + length: #新加的 这里可能有错 具体扩展大小是+32还是？需要再次思考
+            self.memory.append(0)
             
+        data = self.memory[mem_offset:mem_offset+length]
+        log_entry = {
+            "address": self.txn.thisAddr,
+            "data": data.hex(),
+            "topics": [f"0x{topic:064x}" for topic in topics]
+        }
+        self.logs.append(log_entry)
     
     def run (self):
         self.findValidJumpDestinations()
@@ -487,10 +687,48 @@ class EVM:
             elif SWAP1 <= op <= SWAP16: # 如果是SWAP1-SWAP16
                 position = op - SWAP1 + 1
                 self.swap(position)
-            
+            elif op == SHA3:
+                pdb.set_trace()
+                self.sha3()
+            elif op == BALANCE:
+                self.balance()
+            elif op == EXTCODESIZE:
+                self.extcodesize()
+            elif op == EXTCODECOPY:
+                self.extcodecopy()
+            elif op == EXTCODEHASH:
+                self.extcodehash()
+            elif op == ADDRESS:
+                self.address()
+            elif op == CALLDATALOAD:
+                self.calldataload()
+            elif op == CALLDATASIZE:
+                self.calldatasize()
+            elif op == CALLDATACOPY:
+                self.calldatacopy()
+            elif op == CODESIZE:
+                self.codesize()
+            elif op == CODECOPY:
+                self.codecopy()
+            elif op == GASPRICE:
+                self.gasprice()
+            elif op == LOG0:
+                self.evm_log(0)
+            elif op == LOG1:
+                self.evm_log(1)
+            elif op == LOG2:
+                self.evm_log(2)
+            elif op == LOG3:
+                self.evm_log(3)
+            elif op == LOG4:
+                self.evm_log(4)
             else:
                 raise Exception("Invalid opcode")
 if __name__ == "__main__":
+    addr = '0x9bbfed6889322e016e0a02ee459d306fc19545d8'
+    txn = Transaction(to=addr, value=10, data='0x9059cbb20000000000000000000000009bbfed6889322e016e0a02ee459d306fc19545d80000000000000000000000000000000000000000000000000000000000000001', 
+                  caller=addr, origin=addr, thisAddr=addr)
+
     #code = b"\x60\x01\x60\x01" #push test
     #code = b"\x60\x01\x60\x01\x50" #push pop test    
     #code = b"\x60\x02\x60\x03\x01" # add test
@@ -522,10 +760,66 @@ if __name__ == "__main__":
 
     #code = b"\x43\x40" # blockhash test
     #code = b"\x60\x01\x60\x02\x80" # dup1 test
-    code = b"\x60\x01\x60\x02\x90" # swap1 test
-
-
-    evm = EVM(code)
+    #code = b"\x60\x01\x60\x02\x90" # swap1 test
+    #code = b"\x5F\x5F\x20" # sha3 test #push0 push0 sha3
+    # bytecode = b"\x60\x01\x60\x01\x20"
+    #code = b"\x73\x9b\xbf\xed\x68\x89\x32\x2e\x01\x6e\x0a\x02\xee\x45\x9d\x30\x6f\xc1\x95\x45\xd8\x31" #USH20 9bbfed6889322e016e0a02ee459d306fc19545d8 BALANCE）。这个字节码使用PUSH20将一个地址推入堆栈，然后使用BALANCE指令查询该地址的余额。
+    # BALANCE
+    #code = b"\x73\x9b\xbf\xed\x68\x89\x32\x2e\x01\x6e\x0a\x02\xee\x45\x9d\x30\x6f\xc1\x95\x45\xd8\x3B"
+    #code = b"\x60\x04\x5F\x5F\x73\x9b\xbf\xed\x68\x89\x32\x2e\x01\x6e\x0a\x02\xee\x45\x9d\x30\x6f\xc1\x95\x45\xd8\x3C"
+    #code = b"\x73\x9b\xbf\xed\x68\x89\x32\x2e\x01\x6e\x0a\x02\xee\x45\x9d\x30\x6f\xc1\x95\x45\xd8\x3F"
+    # ADDRESS
+    #code = b"\x30"
+    #evm = EVM(code, txn)
+    #evm.run()
+    #print(evm.stack)
+    # CALLDATALOAD
+    code = b"\x60\x04\x35"
+    evm = EVM(code, txn)
     evm.run()
-    print(evm.stack)  
-   
+    print(evm.stack)
+    print(hex(evm.stack[-1]))
+    # output: 0x9bbfed6889322e016e0a02ee459d306fc19545d8
+    # CALLDATASIZE
+    # CALLDATASIZE
+    code = b"\x36"
+    evm = EVM(code, txn)
+    evm.run()
+    print(evm.stack)
+   # output: 68 (4+32+32)
+    # CALLDATACOPY
+    code = b"\x60\x04\x5F\x5F\x37"
+    evm = EVM(code, txn)
+    evm.run()
+    print(evm.memory.hex())
+    # code size
+    code = b"\x38"
+    evm = EVM(code, txn)
+    evm.run()
+    print(evm.stack)
+    # output: 4
+    code = b"\x60\x04\x5F\x5F\x39" # codecopy
+    evm = EVM(code, txn)
+    evm.run()
+    print(evm.memory.hex())
+
+    # GASPRICE
+    code = b"\x3A"
+    evm = EVM(code, txn)
+    evm.run()
+    print(evm.stack) #1X
+    # LOG0
+    code = b"\x60\xaa\x60\x00\x52\x60\x01\x60\x1f\xa0"
+    evm = EVM(code, txn)
+    evm.run()
+    print(evm.logs)
+    
+    #LOG1
+    code = b"\x60\xaa\x60\x00\x52\x60\x11\x60\x01\x60\x1f\xa1"
+    evm = EVM(code, txn)
+    evm.run()
+    print(evm.logs)
+    # output: [{'address': '0x9bbfed6889322e016e0a02ee459d306fc19545d8', 'data': 'aa', 'topics': ['0x00000000000000000000000000000000000000000000
+
+    #print(evm.stack)  
+    #print(hex(evm.stack[-1]))
